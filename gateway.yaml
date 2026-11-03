@@ -10,6 +10,12 @@ backend:
   # url: http://127.0.0.1:8080
   llama_server: llama.cpp/llama-server
 
+# Per-request limits (these are the defaults). Sizes are in MiB.
+limits:
+  max_embedding_items: 64
+  max_image_mb: 10
+  max_body_mb: 50
+
 checkpoints:
   # The section name is the router's model id.
   Qwen3-VL-Embedding-2B-Q8_0:
@@ -28,14 +34,19 @@ served_models:
   Qwen3-VL-Embedding-2B:
     checkpoint: Qwen3-VL-Embedding-2B-Q8_0
     format: qwen3-vl-embedding
-    dimensions: 2048
-    modalities: [text]
+    # Native size, and the smallest size a request may truncate to with `dimensions` (MRL).
+    max_dimensions: 2048
+    min_dimensions: 64
+    # Size returned when a request has no `dimensions`; defaults to max_dimensions.
+    # dimensions: 1024
+    modalities: [text, image]
     # Optional overrides of the Prompt Format's default Instructions:
     # instructions: {document: "...", query: "..."}
   # For clients that cannot send input_type/task.
   Qwen3-VL-Embedding-2B-query:
     checkpoint: Qwen3-VL-Embedding-2B-Q8_0
     format: qwen3-vl-embedding
-    dimensions: 2048
-    modalities: [text]
+    max_dimensions: 2048
+    min_dimensions: 64
+    modalities: [text, image]
     role: query

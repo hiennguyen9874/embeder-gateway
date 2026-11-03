@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -24,6 +25,9 @@ class FakeBackend:
         self.vector = [3.0, 4.0] + [0.0] * 2046
         self.statuses = {"Qwen3-VL-Embedding-2B-Q8_0": "loaded"}
         self.embeddings_response: httpx.Response | None = None
+        # Per-input hooks: the vector to return, and an error message to reject the input with (400).
+        self.vector_for: Callable[[dict], list[float]] = lambda input: self.vector
+        self.reject: Callable[[dict], str | None] = lambda input: None
 
     @property
     def embedding_bodies(self) -> list[dict]:
@@ -41,10 +45,13 @@ class FakeBackend:
             if self.embeddings_response is not None:
                 return self.embeddings_response
             body = json.loads(request.content)
+            for input in body["input"]:
+                if message := self.reject(input):
+                    return httpx.Response(400, json={"error": {"code": 400, "message": message, "type": "exceed_context_size_error"}})
             return httpx.Response(200, json={
                 "model": body["model"],
                 "object": "list",
-                "data": [{"object": "embedding", "index": i, "embedding": self.vector} for i in range(len(body["input"]))],
+                "data": [{"object": "embedding", "index": i, "embedding": self.vector_for(input)} for i, input in enumerate(body["input"])],
                 "usage": {"prompt_tokens": 7 * len(body["input"]), "total_tokens": 7 * len(body["input"])},
             })
         return httpx.Response(404, json={"error": {"message": "File Not Found", "type": "not_found_error", "code": 404}})

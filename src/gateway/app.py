@@ -1,9 +1,12 @@
 """API layer: routes, Bearer auth, OpenAI-style errors."""
 
+import asyncio
+import base64
 import hmac
 import math
+import struct
 from contextlib import asynccontextmanager
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -13,6 +16,7 @@ from starlette.exceptions import HTTPException
 
 from gateway.backend import BackendClient, BackendError
 from gateway.config import Registry, ServedModel
+from gateway.items import InvalidItem, embedding_items
 
 # input_type values (Cohere/Voyage/NIM style) -> Input Role
 INPUT_TYPES = {
@@ -35,8 +39,10 @@ def error_response(status: int, message: str, code: str | None = None, type: str
 
 class EmbeddingsRequest(BaseModel):
     model: str
-    input: str | list[str]
-    encoding_format: Literal["float"] = "float"
+    # Shapes are checked by the Request Adapters, which name the offending Item.
+    input: Any = None
+    messages: Any = None
+    encoding_format: Literal["float", "base64"] = "float"
     dimensions: int | None = None
     input_type: str | None = None
     task: str | None = None
@@ -58,6 +64,38 @@ def l2_normalize(vec: list[float]) -> list[float]:
     return [x / norm for x in vec] if norm else vec
 
 
+def encode(vec: list[float], encoding_format: str) -> list[float] | str:
+    if encoding_format == "base64":
+        return base64.b64encode(struct.pack(f"<{len(vec)}f", *vec)).decode()
+    return vec
+
+
+class BodyLimit:
+    """Rejects request bodies over the limit with 413, with or without a Content-Length."""
+
+    def __init__(self, app, max_bytes: int):
+        self.app, self.max_bytes = app, max_bytes
+        self.message = f"request body is over the limit of {max_bytes} bytes"
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        declared = dict(scope["headers"]).get(b"content-length", b"")
+        if declared.isdigit() and int(declared) > self.max_bytes:
+            return await error_response(413, self.message, code="request_too_large")(scope, receive, send)
+        received = 0
+
+        async def limited_receive():
+            nonlocal received
+            message = await receive()
+            received += len(message.get("body", b""))
+            if received > self.max_bytes:
+                raise HTTPException(413, self.message)  # FastAPI re-raises HTTPExceptions from body reading
+            return message
+
+        await self.app(scope, limited_receive, send)
+
+
 def create_app(registry: Registry, backend: BackendClient, api_keys: set[str]) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -65,6 +103,9 @@ def create_app(registry: Registry, backend: BackendClient, api_keys: set[str]) -
         await backend.aclose()
 
     app = FastAPI(title="Embedder Gateway", lifespan=lifespan)
+    limits = registry.limits
+    # Added before bearer_auth so it runs inside it: a bad key is a 401 whatever the body size.
+    app.add_middleware(BodyLimit, max_bytes=limits.max_body_bytes)
 
     def served_model(name: str) -> ServedModel:
         if name not in registry.served_models:
@@ -103,16 +144,21 @@ def create_app(registry: Registry, backend: BackendClient, api_keys: set[str]) -
         message = "; ".join(f"{'.'.join(str(p) for p in err['loc'][1:]) or 'body'}: {err['msg']}" for err in e.errors())
         return error_response(400, message, code="invalid_request")
 
+    @app.exception_handler(InvalidItem)
+    async def invalid_item(request: Request, e: InvalidItem):
+        return error_response(400, str(e), code="invalid_request")
+
     @app.exception_handler(HTTPException)
     async def http_error(request: Request, e: HTTPException):
-        return error_response(e.status_code, str(e.detail))
+        return error_response(e.status_code, str(e.detail), code="request_too_large" if e.status_code == 413 else None)
 
     @app.get("/v1/models")
     async def models():
         return {"object": "list", "data": [
             {
                 "id": m.name, "object": "model", "created": 0, "owned_by": "embedder-gateway",
-                "kind": m.format.kind, "modalities": list(m.modalities), "dimensions": m.dimensions,
+                "kind": m.format.kind, "modalities": list(m.modalities),
+                "dimensions": m.dimensions, "max_dimensions": m.max_dimensions,
             }
             for m in registry.served_models.values()
         ]}
@@ -134,20 +180,40 @@ def create_app(registry: Registry, backend: BackendClient, api_keys: set[str]) -
     @app.post("/v1/embeddings")
     async def embeddings(req: EmbeddingsRequest):
         model = served_model(req.model)
-        texts = [req.input] if isinstance(req.input, str) else req.input
-        if not texts:
-            raise APIError(400, "input: must not be empty", code="invalid_request")
-        if req.dimensions is not None and req.dimensions != model.dimensions:
-            raise APIError(400, f"dimensions: {req.model} only supports {model.dimensions}", code="invalid_request")
+        dims = model.dimensions if req.dimensions is None else req.dimensions
+        if not model.min_dimensions <= dims <= model.max_dimensions:
+            raise APIError(
+                400, f"dimensions: {model.name} supports {model.min_dimensions} to {model.max_dimensions}",
+                code="invalid_request",
+            )
+        items = embedding_items(req.input, req.messages, limits.max_embedding_items, limits.max_image_bytes)
+        for where, item in items:
+            given = {"text"} if item.text else set()
+            given |= {"image"} if item.images else set()
+            if missing := sorted(given - set(model.modalities)):
+                raise APIError(400, f"{where}: {model.name} does not accept {' or '.join(missing)} input", code="invalid_request")
 
         instruction = model.instructions[resolve_role(req, model)]
-        result = await backend.embed(model.checkpoint.name, [model.format.render(t, instruction) for t in texts])
-        data = sorted(result["data"], key=lambda d: d["index"])
+        inputs = [model.format.render(item, instruction if item.instruction is None else item.instruction) for _, item in items]
+        # One Backend request per Item: the Backend fails a batch without saying which input was at fault.
+        results = await asyncio.gather(*(backend.embed(model.checkpoint.name, [i]) for i in inputs), return_exceptions=True)
+        for (where, _), r in zip(items, results):
+            if isinstance(r, BackendError) and r.status == 400:
+                raise APIError(400, f"{where}: {r.message}", code="invalid_input")
+        for r in results:
+            if isinstance(r, BaseException):
+                raise r
+
+        tokens = sum(r.get("usage", {}).get("prompt_tokens", 0) for r in results)
         return {
             "object": "list",
-            "data": [{"object": "embedding", "index": i, "embedding": l2_normalize(d["embedding"])} for i, d in enumerate(data)],
+            "data": [
+                {"object": "embedding", "index": i,
+                 "embedding": encode(l2_normalize(r["data"][0]["embedding"][:dims]), req.encoding_format)}
+                for i, r in enumerate(results)
+            ],
             "model": model.name,
-            "usage": result.get("usage", {"prompt_tokens": 0, "total_tokens": 0}),
+            "usage": {"prompt_tokens": tokens, "total_tokens": tokens},
         }
 
     return app

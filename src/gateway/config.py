@@ -8,7 +8,10 @@ import yaml
 from gateway.prompts import FORMATS, PromptFormat
 
 ROLES = ("document", "query")
+MODALITIES = ("text", "image")
 DEFAULT_ARGS = {"parallel": 4, "ctx-size": 32768}
+DEFAULT_LIMITS = {"max_embedding_items": 64, "max_image_mb": 10, "max_body_mb": 50}
+MB = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -30,10 +33,19 @@ class ServedModel:
     name: str
     checkpoint: Checkpoint
     format: PromptFormat
-    dimensions: int
+    dimensions: int  # returned when the request has no `dimensions`
+    min_dimensions: int  # smallest MRL truncation
+    max_dimensions: int  # the Checkpoint's native size
     modalities: tuple[str, ...]
     role: str  # Input Role used when the request carries none
     instructions: dict[str, str]  # Instruction per Input Role
+
+
+@dataclass(frozen=True)
+class Limits:
+    max_embedding_items: int
+    max_image_bytes: int
+    max_body_bytes: int
 
 
 @dataclass(frozen=True)
@@ -42,6 +54,7 @@ class Registry:
     served_models: dict[str, ServedModel]
     backend_url: str | None  # external router; None means the gateway starts one
     llama_server: Path
+    limits: Limits
 
 
 def load_registry(path: str | Path) -> Registry:
@@ -74,20 +87,35 @@ def load_registry(path: str | Path) -> Registry:
         role = m.get("role", "document")
         if role not in ROLES:
             raise ValueError(f"served model {name!r}: role must be one of {ROLES}")
+        if not set(m["modalities"]) <= set(MODALITIES):
+            raise ValueError(f"served model {name!r}: modalities must be among {MODALITIES}")
+        max_dims = m["max_dimensions"]
+        min_dims = m.get("min_dimensions", max_dims)
+        dims = m.get("dimensions", max_dims)
+        if not 0 < min_dims <= dims <= max_dims:
+            raise ValueError(f"served model {name!r}: needs 0 < min_dimensions <= dimensions <= max_dimensions")
         served[name] = ServedModel(
             name=name,
             checkpoint=checkpoints[m["checkpoint"]],
             format=fmt,
-            dimensions=m["dimensions"],
+            dimensions=dims,
+            min_dimensions=min_dims,
+            max_dimensions=max_dims,
             modalities=tuple(m["modalities"]),
             role=role,
             instructions={**fmt.instructions, **m.get("instructions", {})},
         )
 
     backend = raw.get("backend", {})
+    limits = {**DEFAULT_LIMITS, **raw.get("limits", {})}
     return Registry(
         checkpoints=checkpoints,
         served_models=served,
         backend_url=backend.get("url"),
         llama_server=base / backend.get("llama_server", "llama.cpp/llama-server"),
+        limits=Limits(
+            max_embedding_items=limits["max_embedding_items"],
+            max_image_bytes=int(limits["max_image_mb"] * MB),
+            max_body_bytes=int(limits["max_body_mb"] * MB),
+        ),
     )

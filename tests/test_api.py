@@ -42,7 +42,16 @@ def test_unknown_model_is_404_listing_served_models(gateway, backend):
     {"model": "Qwen3-VL-Embedding-2B"},  # no input
     {"model": "Qwen3-VL-Embedding-2B", "input": []},
     {"model": "Qwen3-VL-Embedding-2B", "input": 42},
-    {"model": "Qwen3-VL-Embedding-2B", "input": "x", "dimensions": 1024},
+    {"model": "Qwen3-VL-Embedding-2B", "input": "x", "dimensions": 63},
+    {"model": "Qwen3-VL-Embedding-2B", "input": "x", "dimensions": 2049},
+    {"model": "Qwen3-VL-Embedding-2B", "input": "x", "encoding_format": "int8"},
+    {"model": "Qwen3-VL-Embedding-2B", "input": ["x", 7]},
+    {"model": "Qwen3-VL-Embedding-2B", "input": "x", "messages": [{"role": "user", "content": "x"}]},
+    {"model": "Qwen3-VL-Embedding-2B", "messages": []},
+    {"model": "Qwen3-VL-Embedding-2B", "messages": [{"role": "user", "content": "x"}, {"role": "assistant", "content": "y"}]},
+    {"model": "Qwen3-VL-Embedding-2B", "messages": [{"role": "user", "content": [{"type": "input_audio", "input_audio": {}}]}]},
+    {"model": "Qwen3-VL-Embedding-2B", "messages": [{"role": "user", "content": [{"type": "text", "text": 1}]}]},
+    {"model": "Qwen3-VL-Embedding-2B", "input": [{"txt": "typo"}]},
 ])
 def test_invalid_embeddings_request_is_400(gateway, backend, body):
     assert_openai_error(gateway.post("/v1/embeddings", headers=AUTH, json=body), 400)
@@ -66,7 +75,7 @@ def test_backend_rejecting_the_input_is_400(gateway, backend):
         "code": 400, "message": "input (9000 tokens) is too large to process", "type": "invalid_request_error",
     }})
     error = assert_openai_error(gateway.post("/v1/embeddings", headers=AUTH, json={"model": "Qwen3-VL-Embedding-2B", "input": "x"}), 400)
-    assert "too large" in error["message"]
+    assert error["message"] == "input: input (9000 tokens) is too large to process"
 
 
 def test_backend_failure_is_502(gateway, backend):
@@ -83,9 +92,9 @@ def test_models_lists_every_served_model_with_its_capabilities(gateway, backend)
     assert r.status_code == 200, r.text
     assert r.json() == {"object": "list", "data": [
         {"id": "Qwen3-VL-Embedding-2B", "object": "model", "created": 0, "owned_by": "embedder-gateway",
-         "kind": "embedding", "modalities": ["text"], "dimensions": 2048},
+         "kind": "embedding", "modalities": ["text", "image"], "dimensions": 2048, "max_dimensions": 2048},
         {"id": "Qwen3-VL-Embedding-2B-query", "object": "model", "created": 0, "owned_by": "embedder-gateway",
-         "kind": "embedding", "modalities": ["text"], "dimensions": 2048},
+         "kind": "embedding", "modalities": ["text", "image"], "dimensions": 2048, "max_dimensions": 2048},
     ]}
     assert backend.requests == []
 

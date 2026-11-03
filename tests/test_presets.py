@@ -24,7 +24,7 @@ served_models:
   emb:
     checkpoint: Emb-Q8_0
     format: qwen3-vl-embedding
-    dimensions: 2048
+    max_dimensions: 2048
     modalities: [text]
 """)
     weights = tmp_path / "weights"

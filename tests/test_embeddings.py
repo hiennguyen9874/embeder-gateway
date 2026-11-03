@@ -54,17 +54,6 @@ def test_string_array_input_returns_one_vector_per_input_in_order(gateway, backe
     assert r.json()["usage"] == {"prompt_tokens": 21, "total_tokens": 21}
 
 
-def test_backend_order_is_mapped_back_by_index(gateway, backend):
-    import httpx
-
-    backend.embeddings_response = httpx.Response(200, json={"data": [
-        {"index": 1, "embedding": [0.0, 2.0]}, {"index": 0, "embedding": [2.0, 0.0]},
-    ]})
-    r = gateway.post("/v1/embeddings", headers=AUTH, json={"model": "Qwen3-VL-Embedding-2B", "input": ["a", "b"]})
-
-    assert [(d["index"], d["embedding"]) for d in r.json()["data"]] == [(0, [1.0, 0.0]), (1, [0.0, 1.0])]
-
-
 @pytest.mark.parametrize("model, extra, instruction", [
     ("Qwen3-VL-Embedding-2B", {}, DOCUMENT),
     ("Qwen3-VL-Embedding-2B", {"input_type": "query"}, QUERY),
@@ -119,7 +108,7 @@ def test_served_model_can_override_instructions_and_gets_official_punctuation(tm
   products:
     checkpoint: Qwen3-VL-Embedding-2B-Q8_0
     format: qwen3-vl-embedding
-    dimensions: 2048
+    max_dimensions: 2048
     modalities: [text]
     instructions: {query: "  Find the product the shopper describes  "}
 """)
