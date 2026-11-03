@@ -1,2 +1,4 @@
 /.pi/
 /models/
+__pycache__/
+/.vscode/

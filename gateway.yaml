@@ -1,0 +1,41 @@
+# Single source of truth for the gateway: Checkpoints (what the llama-server router loads)
+# and Served Models (what clients put in `model`). See GLOSSARY.md.
+
+# Where `gateway download` puts Checkpoints, as models/<org>--<repo>/. Relative to this file.
+models_dir: models
+
+backend:
+  # Leave `url` unset to have the gateway start the router as a child process.
+  # Set it to use an externally managed router; its key comes from GATEWAY_BACKEND_API_KEY.
+  # url: http://127.0.0.1:8080
+  llama_server: llama.cpp/llama-server
+
+checkpoints:
+  # The section name is the router's model id.
+  Qwen3-VL-Embedding-2B-Q8_0:
+    repo: mradermacher/Qwen3-VL-Embedding-2B-GGUF
+    model: Qwen3-VL-Embedding-2B.Q8_0.gguf
+    mmproj: Qwen3-VL-Embedding-2B.mmproj-f16.gguf
+    # llama-server flags (long names, no leading dashes). Defaults: parallel 4, ctx-size 32768.
+    # `device` names a device as seen through CUDA_VISIBLE_DEVICES.
+    args:
+      embedding: true
+      pooling: last
+      embd-normalize: 2
+      device: CUDA0
+
+served_models:
+  Qwen3-VL-Embedding-2B:
+    checkpoint: Qwen3-VL-Embedding-2B-Q8_0
+    format: qwen3-vl-embedding
+    dimensions: 2048
+    modalities: [text]
+    # Optional overrides of the Prompt Format's default Instructions:
+    # instructions: {document: "...", query: "..."}
+  # For clients that cannot send input_type/task.
+  Qwen3-VL-Embedding-2B-query:
+    checkpoint: Qwen3-VL-Embedding-2B-Q8_0
+    format: qwen3-vl-embedding
+    dimensions: 2048
+    modalities: [text]
+    role: query
