@@ -6,6 +6,14 @@ A Python gateway that serves multimodal (text + image) embedding and reranking m
 
 Python, managed with uv. FastAPI + httpx; pytest.
 
+## Code map (`src/gateway/`)
+
+- `cli.py` loads the registry and keys, then dispatches download or serves the app with a managed or external Backend.
+- `config.py` builds the Registry: Checkpoints describe router models; Served Models bind public names to a Checkpoint, Prompt Format, modalities and instructions.
+- `app.py` owns HTTP routes, auth, limits, errors and response shaping. It adapts inputs via `items.py`, renders them with `prompts.py`, and calls `backend.py` once per input, sharing concurrency slots per Checkpoint. Reranking also uses the Backend embeddings endpoint, reading raw rank-pooling scores.
+- `items.py` validates wire shapes and images into neutral Items; `prompts.py` renders Items into model-specific Backend inputs and registers formats.
+- `backend.py` wraps router HTTP calls; `supervisor.py` manages the local router lifecycle or selects an external router. `presets.py` renders router presets from the Registry; `download.py` fetches configured Checkpoint files.
+
 ## Testing
 
 - Default suite: drive the gateway's public HTTP API in-process with a fake Backend (httpx `MockTransport`). Assert on the responses and on the exact requests sent to the Backend.
