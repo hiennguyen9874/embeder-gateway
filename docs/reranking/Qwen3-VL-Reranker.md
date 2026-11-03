@@ -61,16 +61,40 @@ Các marker được model card xác nhận:
 - tensor `cls.output.weight` có shape `(2048, 2)`;
 - có `tokenizer.chat_template.rerank` chứa template `{query}`/`{document}`.
 
-### Vì sao không mặc định dùng các bản mradermacher
+### So sánh các bản community đã kiểm tra
 
-Hai repository sau có nhiều quant nhỏ hơn:
+Cả bốn repo dưới đây đều dựa trên `Qwen/Qwen3-VL-Reranker-2B`; chúng khác nhau ở conversion, quant và các file đi kèm, không phải bốn model được huấn luyện độc lập.
 
-- [mradermacher/Qwen3-VL-Reranker-2B-GGUF](https://huggingface.co/mradermacher/Qwen3-VL-Reranker-2B-GGUF): static quants Q2_K–Q8_0/f16 và projector;
-- [mradermacher/Qwen3-VL-Reranker-2B-i1-GGUF](https://huggingface.co/mradermacher/Qwen3-VL-Reranker-2B-i1-GGUF): imatrix quants IQ1–Q6; projector phải lấy từ static repo.
+- [bealore](https://huggingface.co/bealore/Qwen3-VL-Reranker-2B-GGUF): F16, Q8_0 và projector F16. Gateway hiện dùng Q8_0 + projector F16.
+- [gorse-io](https://huggingface.co/gorse-io/Qwen3-VL-Reranker-2B-GGUF): BF16, Q8_0, Q4_K_M và projector F16. Repo có [conversion report](https://huggingface.co/gorse-io/Qwen3-VL-Reranker-2B-GGUF/blob/main/conversion-report.json) và smoke test text.
+- [mradermacher static](https://huggingface.co/mradermacher/Qwen3-VL-Reranker-2B-GGUF): nhiều quant Q2–Q8/F16 và projector F16/Q8.
+- [mradermacher i1](https://huggingface.co/mradermacher/Qwen3-VL-Reranker-2B-i1-GGUF): weighted/imatrix quants IQ1–Q6; projector nằm trong repo static.
 
-Tuy nhiên, README của hai repo này chỉ liệt kê quant và không xác nhận `pooling_type`, `cls.output.weight`, output labels hay rerank template. Model card của bealore cảnh báo một số community GGUF được xuất như model Qwen3-VL sinh văn bản thông thường: chúng có thể load với `--pooling rank` mà không báo lỗi nhưng trả score gần như hằng số và vô nghĩa.
+Kiểm tra trực tiếp các file sau bằng `GGUFReader` của llama.cpp cho kết quả:
 
-Vì vậy không nên chọn GGUF chỉ dựa trên tên file hoặc việc server khởi động thành công. Chỉ dùng một quant khác sau khi xác nhận đủ bốn marker trên và chạy smoke test phân biệt rõ document liên quan/không liên quan. Các command bên dưới cố ý dùng bản bealore đã được xác minh.
+| File | RANK pooling, labels `yes/no`, `cls.output.weight` và rerank template |
+| --- | --- |
+| bealore `Qwen3-VL-Reranker-2B.Q8_0.gguf` | Có cả bốn |
+| gorse `Qwen3-VL-Reranker-2B-Q4_K_M.gguf` | Có cả bốn |
+| mradermacher static `Qwen3-VL-Reranker-2B.Q4_K_M.gguf` | Không có cả bốn |
+| mradermacher i1 `Qwen3-VL-Reranker-2B.i1-Q4_K_M.gguf` | Không có cả bốn |
+
+Đây là kết quả cho **các file cụ thể**, không khẳng định mọi quant khác trong các repo đều giống vậy. Có rerank template hữu ích cho `/v1/rerank` của llama.cpp; gateway tự dựng prompt nên không dùng template đó. Ngược lại, rank head đúng là cần thiết cho cả pipeline gateway. Model card bealore cảnh báo một số GGUF được xuất như model sinh văn bản thông thường có thể load với `--pooling rank` nhưng cho điểm vô nghĩa: YAML hay việc server khởi động không thể tự tạo rank head bị thiếu.
+
+#### Thử thực tế qua gateway
+
+Thử thủ công qua API gateway và llama-server build 12072 trên A100, `pooling: rank`, `parallel: 1`, context 8192. Mỗi bản dùng projector F16 cùng repo; i1 dùng projector từ repo static. Các số dưới đây là kết quả của các ví dụ smoke, **không phải benchmark hoặc parity test đầy đủ**.
+
+| File | Text: Paris / chuối / Eiffel | Document ảnh: ma trận / llama | Query ảnh llama: caption llama / ma trận |
+| --- | --- | --- | --- |
+| bealore Q8_0 | 0,774 / 0,077 / 0,333 | 0,638 / 0,216 | 0,411 / 0,145 |
+| gorse Q4_K_M | 0,650 / 0,069 / 0,223 | 0,442 / 0,104 | 0,231 / 0,089 |
+| mradermacher static Q4_K_M | 3,85e-17 / 7,93e-18 / 2,72e-17 | 1,03e-19 / 2,24e-20 | 8,14e-18 / 1,77e-19 |
+| mradermacher i1 Q4_K_M | 7,50e-19 / 1,12e-18 / 3,76e-17 | 4,51e-19 / 2,23e-19 | 5,29e-18 / 3,26e-17 |
+
+Gorse Q4 xếp đúng thứ tự trong các ví dụ trên, nhưng ở query ảnh, khoảng cách đúng–sai chỉ khoảng **0,142**, dưới ngưỡng **0,2** của `tests/test_gpu_smoke.py`. Hai file mradermacher trả HTTP 200 nhưng điểm gần 0; bản i1 xếp sai cả ví dụ text lẫn query ảnh. Không nên dùng hai file này làm rank-pooling reranker.
+
+Giữ bealore Q8_0 làm mặc định. Gorse Q4 là ứng viên tiết kiệm bộ nhớ, nhưng cần chạy smoke/parity test và đánh giá trên dữ liệu thực tế trước khi thay. Gorse và mradermacher static có thể cấu hình `repo`, `model`, `mmproj` trong `gateway.yaml`, chạy `uv run gateway download` và khởi động lại; với router ngoài phải cập nhật router riêng. Với i1, downloader hiện giả định model và projector cùng repo, nên cần xử lý projector thủ công. Chỉ thay YAML không sửa được rank head thiếu.
 
 ## 3. Chạy server rerank văn bản trên GPU
 
@@ -355,6 +379,7 @@ Với video, cần xác nhận decoder và frame sampling của phiên bản lib
 
 - [Qwen/Qwen3-VL-Reranker-2B](https://huggingface.co/Qwen/Qwen3-VL-Reranker-2B)
 - [bealore/Qwen3-VL-Reranker-2B-GGUF](https://huggingface.co/bealore/Qwen3-VL-Reranker-2B-GGUF)
+- [gorse-io/Qwen3-VL-Reranker-2B-GGUF](https://huggingface.co/gorse-io/Qwen3-VL-Reranker-2B-GGUF)
 - [mradermacher/Qwen3-VL-Reranker-2B-i1-GGUF](https://huggingface.co/mradermacher/Qwen3-VL-Reranker-2B-i1-GGUF)
 - [mradermacher/Qwen3-VL-Reranker-2B-GGUF](https://huggingface.co/mradermacher/Qwen3-VL-Reranker-2B-GGUF)
 - llama.cpp build 12072: [`handle_rerank_impl` và `handle_embeddings_impl`](../../llama.cpp/tools/server/server-context.cpp), [`format_prompt_rerank` và `tokenize_oai_content_array`](../../llama.cpp/tools/server/server-common.cpp), [`POST /reranking` trong README server](../../llama.cpp/tools/server/README.md), rank graph trong [`llama-graph.cpp`](../../llama.cpp/src/llama-graph.cpp), và rerank template trong [`conversion/qwen.py`](../../llama.cpp/conversion/qwen.py)
