@@ -181,3 +181,4 @@ pyrightconfig.json
 /.pi/
 /models/
 /.vscode/
+models-preset.ini
