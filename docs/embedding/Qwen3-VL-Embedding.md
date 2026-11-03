@@ -13,16 +13,18 @@ Thông số chính từ model card chính thức:
 
 Model card báo điểm tổng MMEB-V2 là `73.2` và MMTEB Mean (Task) là `63.87`. Đây là mô hình embedding, không phải model chat/generation.
 
+> **Cách triển khai được hỗ trợ: Embedder Gateway.** Tài liệu này là ghi chú nghiên cứu về cách gọi llama.cpp trực tiếp, đã cập nhật cho llama.cpp **build 12072** (`ca8daad19`). Trong repo này, client (kể cả WeKnora) nên gọi gateway: gateway dựng đúng prompt chính thức (Instruction theo Input Role, chat wrapping, vị trí ảnh), nhận cả `input` lẫn vLLM `messages`, rút gọn MRL và chuẩn hóa lại vector. Xem [README](../../README.md), [hướng dẫn WeKnora](../weknora.md) và [ADR 0001](../adr/0001-llama-server-router-as-backend.md)/[0002](../adr/0002-public-api-openai-embeddings-cohere-rerank.md). Thuật ngữ (Served Model, Checkpoint, Prompt Format, Instruction, Input Role, Item) theo [GLOSSARY.md](../../GLOSSARY.md). Các command `llama-server` bên dưới hữu ích khi debug Backend hoặc thử Checkpoint mới.
+
 ## 1. Yêu cầu
 
-Dùng bản llama.cpp mới có hỗ trợ kiến trúc Qwen3-VL, embedding và multimodal projector (`mmproj`). Kiểm tra binary và thiết bị:
+Dùng llama.cpp **build 12072** (`ca8daad19`) hoặc mới hơn. Đây là build mà gateway và các parity test được kiểm tra; build này có kiến trúc Qwen3-VL, multimodal projector (`mmproj`), router mode (`--models-preset`) và **OAI content array trong `/v1/embeddings`** (mục 6.1). Kiểm tra binary và thiết bị:
 
 ```bash
 ./llama.cpp/llama-server --version
 ./llama.cpp/llama-server --list-devices
 ```
 
-Các option liên quan trong [llama-cpp.md](llama-cpp.md):
+Các option liên quan trong [llama-cpp-cli.md](../llama-cpp-cli.md):
 
 - `--embedding`/`--embeddings`: chỉ bật use case embedding;
 - `--pooling last`: lấy hidden state của token cuối làm vector cho Qwen embedding;
@@ -129,10 +131,10 @@ Theo model card chính thức, input mặc định phải được bọc bằng 
 
 Checkpoint Hugging Face **có** `chat_template.jinja`; template này thêm system prompt mặc định nói trên và, khi `add_generation_prompt=true`, kết thúc bằng `<|im_start|>assistant\n`. Converter llama.cpp đọc cả file Jinja độc lập này, và GGUF mradermacher cũng có metadata `tokenizer.chat_template` chứa đúng template đó. Vì vậy đây không phải lỗi thiếu template khi convert/quantize.
 
-Tuy nhiên, template trong GGUF không đồng nghĩa mọi endpoint đều tự dùng nó. Trong phiên bản llama.cpp được kiểm tra (`01818e495`, build 10480):
+Tuy nhiên, template trong GGUF không đồng nghĩa mọi endpoint đều tự dùng nó. Trong build 12072 (`ca8daad19`):
 
 - `/v1/chat/completions` nhận `messages`, gọi `oaicompat_chat_params_parse()`, rồi `common_chat_templates_apply()`;
-- `/v1/embeddings` và `/embedding` nhận `input`/`content`, rồi gọi thẳng `tokenize_input_prompts(..., add_special=true, parse_special=true)`; đường xử lý này không gọi chat-template engine.
+- `/v1/embeddings` và `/embedding` nhận `input`/`content`, rồi tokenize thẳng (`tokenize_input_subprompt()`, hoặc `tokenize_oai_content_array()` với phần tử dạng `{"content": [...]}`), luôn với `add_special=true, parse_special=true`; không đường nào gọi chat-template engine. Với content array, các phần `text` được nối nguyên văn và ảnh được chèn đúng vị trí của phần `image_url`, nhưng không có system prompt hay role nào được thêm.
 
 Đây là chủ ý của API: embedding input có thể là text thô, chuỗi đã format, token ID, batch, hoặc nội dung multimodal; endpoint không có `messages`/role để biết đâu là system instruction. Tự động bọc mọi input bằng chat template cũng sẽ làm sai các embedding model không được huấn luyện theo chat format và bọc hai lần input đã format. Option `--chat-template` chỉ chọn/ghi đè template cho các đường xử lý chat và `/apply-template`; nó không ép `/v1/embeddings` dùng template.
 
@@ -192,7 +194,38 @@ Với retrieval, nên dùng instruction mô tả task cho query, ví dụ `Retri
 
 ## 6. Embedding ảnh và text + ảnh
 
-API OpenAI `/v1/embeddings` chuẩn chỉ mô tả input văn bản. llama.cpp hỗ trợ multimodal embedding qua endpoint riêng `/embedding`, với `content.prompt_string` chứa media marker và `content.multimodal_data` chứa dữ liệu base64 theo đúng thứ tự marker.
+API OpenAI `/v1/embeddings` chuẩn chỉ mô tả input văn bản. Build 12072 có hai cách gửi ảnh:
+
+1. **`/v1/embeddings` với OAI content array** (mục 6.1): mỗi phần tử của `input` có thể là `{"content": [...]}` gồm các phần `text` và `image_url` giống `/v1/chat/completions`; mỗi object cho một vector. Gateway dùng đường này cho cả embedding lẫn rerank.
+2. **Low-level `/embedding`** (mục 6.2): `content.prompt_string` chứa media marker và `content.multimodal_data` chứa base64 theo đúng thứ tự marker. Vẫn hoạt động, nhưng phải tự lấy marker từ `/props`.
+
+Cả hai đều **không** áp dụng chat template: client phải tự dựng toàn bộ prompt như mục 5.
+
+### 6.1. `/v1/embeddings` với content array
+
+`image_url.url` nhận data URI base64, base64 thô, URL http(s) hoặc `file://` (cần `--media-path`). mtmd tự bọc mỗi ảnh bằng `<|vision_start|>...<|vision_end|>` (`tools/mtmd/mtmd.cpp`), nên prompt chỉ cần đặt phần `image_url` vào đúng vị trí. Theo `format_model_input()` của script chính thức, ảnh đứng **trước** text trong lượt `user`:
+
+```bash
+IMAGE_URI="data:image/png;base64,$(base64 -w 0 scripts/test.png)"
+
+jq -n --arg image "$IMAGE_URI" '{
+  model: "Qwen3-VL-Embedding-2B",
+  encoding_format: "float",
+  input: [{content: [
+    {type: "text", text: "<|im_start|>system\nRepresent the user'"'"'s input.<|im_end|>\n<|im_start|>user\n"},
+    {type: "image_url", image_url: {url: $image}},
+    {type: "text", text: "A document about llama.cpp deployment.<|im_end|>\n<|im_start|>assistant\n"}
+  ]}]
+}' |
+curl -fsS http://localhost:8001/v1/embeddings \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer llama-cpp-api-key' \
+  -d @-
+```
+
+Chỉ ảnh: bỏ phần text `A document ...` và giữ `<|im_end|>\n<|im_start|>assistant\n` ở phần text cuối. Đây chính là content array mà Prompt Format `qwen3-vl-embedding` của gateway gửi tới Backend (`src/gateway/prompts.py`); gateway kiểm tra nó bằng parity test với script transformers chính thức (`tests/test_gpu_parity.py`).
+
+### 6.2. Low-level `/embedding` với `multimodal_data`
 
 **Không hard-code `<__media__>` trên llama.cpp mới.** [Issue #19947](https://github.com/ggml-org/llama.cpp/issues/19947) xác nhận marker cố định có thể xung đột với text của người dùng; bản sửa cho [issue #21955](https://github.com/ggml-org/llama.cpp/issues/21955) chuyển server sang marker ngẫu nhiên lúc khởi động. Lấy marker thực tế từ `GET /props` (không cần bật option `--props` cho GET). Các ví dụ dưới đây cần `jq`:
 
@@ -204,7 +237,7 @@ printf 'Media marker: %s\n' "$MEDIA_MARKER"
 
 Lấy lại marker sau mỗi lần restart server. Bản llama.cpp cũ chưa có marker ngẫu nhiên dùng `<__media__>`, nhưng nên cập nhật thay vì hard-code để command hoạt động với bản hiện tại.
 
-### Chỉ ảnh
+#### Chỉ ảnh
 
 ```bash
 IMAGE_B64="$(base64 -w 0 scripts/test.png)"
@@ -225,7 +258,7 @@ curl http://localhost:8001/embedding \
 JSON
 ```
 
-### Text + ảnh
+#### Text + ảnh
 
 ```bash
 IMAGE_B64="$(base64 -w 0 scripts/test.png)"
@@ -258,7 +291,7 @@ Server trả vector 2.048 chiều và chuẩn hóa L2 khi dùng `--embd-normaliz
 score = sum(a * b for a, b in zip(query_embedding, document_embedding))
 ```
 
-Model hỗ trợ MRL 64–2.048 chiều, nhưng help hiện tại của llama.cpp không có option server để đặt output dimension. Nếu client cần vector ngắn hơn, lấy `N` chiều đầu rồi chuẩn hóa L2 lại trước khi lưu hoặc so sánh; dùng cùng một `N` cho toàn bộ index và query.
+Model hỗ trợ MRL 64–2.048 chiều, nhưng llama.cpp không có option server hay trường request để đặt output dimension. Nếu client cần vector ngắn hơn, lấy `N` chiều đầu rồi chuẩn hóa L2 lại trước khi lưu hoặc so sánh; dùng cùng một `N` cho toàn bộ index và query. Gateway làm việc này khi request có `dimensions` (trong khoảng `min_dimensions`–`max_dimensions` của Served Model, ngoài khoảng trả 400).
 
 Không nhầm quantization của trọng số GGUF với quantization hậu xử lý của vector embedding: model card nói model hỗ trợ cả hai, còn llama.cpp mặc định trả vector float qua API.
 
@@ -267,7 +300,8 @@ Không nhầm quantization của trọng số GGUF với quantization hậu xử
 - **`/v1/embeddings` báo pooling `none`:** bỏ `--pooling none`, dùng `--pooling last` hoặc để model metadata chọn mặc định.
 - **`number of media markers ... does not match number of bitmaps`:** lấy lại `.media_marker` từ `/props`; số marker trong `prompt_string` phải bằng số phần tử trong `multimodal_data`.
 - **`forbidden character after backslash` gần `<\_`:** JSON không hỗ trợ escape `\_`; bỏ các backslash khỏi marker.
-- **Không nhận ảnh/báo thiếu projector:** cập nhật llama.cpp và chỉ định đúng `--mmproj-url`; không dùng `--no-mmproj`.
+- **Không nhận ảnh/báo thiếu projector:** cập nhật llama.cpp và chỉ định đúng `--mmproj`/`--mmproj-url`; không dùng `--no-mmproj`.
+- **`/v1/embeddings` báo lỗi với `{"content": [...]}`:** build cũ hơn 12072 chưa nhận content array; cập nhật llama.cpp hoặc dùng `/embedding` (mục 6.2).
 - **Vector có chất lượng retrieval kém:** kiểm tra instruction, chat template và dấu generation prompt; không gửi query thô nếu pipeline chuẩn dùng instruction. `/v1/embeddings` không tự áp dụng `tokenizer.chat_template`; hãy format trước hoặc dùng `/apply-template`.
 - **CUDA out of memory:** giảm context, quant model/projector, số image token hoặc số layer GPU; có thể dùng `--no-mmproj-offload`.
 - **Tải model lỗi:** đặt `HF_TOKEN`/`--hf-token` nếu cần; các repository nêu trên hiện là public.
@@ -279,5 +313,6 @@ Không nhầm quantization của trọng số GGUF với quantization hậu xử
 - [DevQuasar/Qwen.Qwen3-VL-Embedding-2B-GGUF](https://huggingface.co/DevQuasar/Qwen.Qwen3-VL-Embedding-2B-GGUF)
 - [mradermacher/Qwen3-VL-Embedding-2B-i1-GGUF](https://huggingface.co/mradermacher/Qwen3-VL-Embedding-2B-i1-GGUF)
 - [mradermacher/Qwen3-VL-Embedding-2B-GGUF](https://huggingface.co/mradermacher/Qwen3-VL-Embedding-2B-GGUF)
-- llama.cpp: [`handle_embeddings_impl`](llama.cpp/tools/server/server-context.cpp) và [`oaicompat_chat_params_parse`](llama.cpp/tools/server/server-common.cpp)
-- Help của binary trong repository: [llama-cpp.md](llama-cpp.md)
+- llama.cpp build 12072: [`handle_embeddings_impl`](../../llama.cpp/tools/server/server-context.cpp), [`tokenize_oai_content_array`](../../llama.cpp/tools/server/server-common.cpp), [`POST /v1/embeddings` trong README server](../../llama.cpp/tools/server/README.md)
+- Help của binary trong repository: [llama-cpp-cli.md](../llama-cpp-cli.md)
+- Gateway: [README](../../README.md), [Prompt Format `qwen3-vl-embedding`](../../src/gateway/prompts.py), [hướng dẫn WeKnora](../weknora.md)
