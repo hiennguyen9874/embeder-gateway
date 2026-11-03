@@ -119,7 +119,7 @@ def create_app(registry: Registry, backend: BackendClient, api_keys: set[str]) -
 
     @app.get("/health")
     async def health():
-        needed = sorted({m.checkpoint.name for m in registry.served_models.values()})
+        needed = sorted(registry.checkpoints)
         try:
             statuses = await backend.model_statuses()
         except BackendError as e:

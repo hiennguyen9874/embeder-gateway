@@ -110,6 +110,36 @@ def test_health_is_503_until_every_preset_is_loaded(gateway, backend, statuses, 
     assert r.json() == {"status": "unavailable", "checkpoints": {"Qwen3-VL-Embedding-2B-Q8_0": reported}}
 
 
+@pytest.mark.parametrize("status", ["unloaded", "loading", None, "loaded"])
+def test_health_checks_checkpoints_without_served_models(tmp_path, backend, status):
+    import httpx
+    import yaml
+    from fastapi.testclient import TestClient
+
+    from conftest import BACKEND_KEY, CONFIG
+    from gateway.app import create_app
+    from gateway.backend import BackendClient
+    from gateway.config import load_registry
+
+    raw = yaml.safe_load(CONFIG.read_text())
+    raw["checkpoints"]["extra"] = dict(next(iter(raw["checkpoints"].values())))
+    config = tmp_path / "gateway.yaml"
+    config.write_text(yaml.safe_dump(raw))
+    if status is not None:
+        backend.statuses["extra"] = status
+
+    client = BackendClient("http://backend", BACKEND_KEY, transport=httpx.MockTransport(backend.handle))
+    with TestClient(create_app(load_registry(config), client, {"k"})) as gateway:
+        r = gateway.get("/health")
+
+    ready = status == "loaded"
+    assert r.status_code == (200 if ready else 503), r.text
+    assert r.json() == {
+        "status": "ok" if ready else "unavailable",
+        "checkpoints": {"Qwen3-VL-Embedding-2B-Q8_0": "loaded", "extra": status or "missing"},
+    }
+
+
 def test_health_is_503_when_the_backend_is_unreachable():
     import httpx
     from fastapi.testclient import TestClient
