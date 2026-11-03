@@ -30,6 +30,9 @@ checkpoints:
       pooling: last
       embd-normalize: 2
       device: CUDA0
+      # The official script's image size bounds (MIN_PIXELS/MAX_PIXELS, in 32x32 tokens); llama.cpp would allow 8..4096.
+      image-min-tokens: 4
+      image-max-tokens: 1800
   Qwen3-VL-Reranker-2B-Q8_0:
     repo: bealore/Qwen3-VL-Reranker-2B-GGUF
     model: Qwen3-VL-Reranker-2B.Q8_0.gguf
@@ -38,6 +41,8 @@ checkpoints:
       reranking: true
       pooling: rank
       device: CUDA0
+      image-min-tokens: 4
+      image-max-tokens: 1280
 
 served_models:
   Qwen3-VL-Embedding-2B:

@@ -16,6 +16,13 @@ gateway = "gateway.cli:main"
 
 [dependency-groups]
 dev = ["pytest"]
+parity = [
+    "qwen-vl-utils>=0.0.14",
+    "scipy>=1.18.1",
+    "torch==2.8.0",
+    "torchvision==0.23.0",
+    "transformers>=4.57,<5",
+]
 
 [build-system]
 requires = ["hatchling"]

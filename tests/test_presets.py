@@ -64,6 +64,8 @@ def test_shipped_config_preset_runs_qwen3_vl_embedding_as_a_last_pooled_normaliz
         "pooling": "last",
         "embd-normalize": "2",
         "device": "CUDA0",
+        "image-min-tokens": "4",
+        "image-max-tokens": "1800",
         "parallel": "4",
         "ctx-size": "32768",
     }
@@ -82,6 +84,8 @@ def test_shipped_config_preset_runs_qwen3_vl_reranker_with_rank_pooling():
         "reranking": "true",
         "pooling": "rank",
         "device": "CUDA0",
+        "image-min-tokens": "4",
+        "image-max-tokens": "1280",
         "parallel": "4",
         "ctx-size": "32768",
     }
