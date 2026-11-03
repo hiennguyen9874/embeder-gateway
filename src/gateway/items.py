@@ -3,7 +3,11 @@
 import base64
 import binascii
 import re
+import warnings
 from dataclasses import dataclass
+from io import BytesIO
+
+from PIL import Image
 
 
 @dataclass(frozen=True)
@@ -40,13 +44,25 @@ def image(value, where: str, max_bytes: int) -> str:
         if not params.endswith(";base64"):
             raise InvalidItem(f"{where}: data URI must be base64-encoded")
     try:
-        size = len(base64.b64decode(payload, validate=True))
+        decoded = base64.b64decode(payload, validate=True)
+        size = len(decoded)
     except (binascii.Error, ValueError):
         raise InvalidItem(f"{where}: not a data URI or valid base64") from None
     if not size:
         raise InvalidItem(f"{where}: image is empty")
     if size > max_bytes:
         raise InvalidItem(f"{where}: image is {size} bytes, over the limit of {max_bytes}")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            # Restrict Pillow to formats the Backend can decode as images, not its video fallback.
+            formats = ("PNG", "JPEG", "GIF", "BMP", "WEBP", "PPM", "TGA", "PSD")
+            with Image.open(BytesIO(decoded), formats=formats) as picture:
+                picture.verify()
+            with Image.open(BytesIO(decoded), formats=formats) as picture:
+                picture.load()
+    except (OSError, ValueError, SyntaxError, Image.DecompressionBombError, Image.DecompressionBombWarning):
+        raise InvalidItem(f"{where}: must contain a valid supported image; video is not supported") from None
     return value
 
 
@@ -77,6 +93,8 @@ def _content(message: dict, where: str, max_image_bytes: int, allow_images: bool
     for j, part in enumerate(content):
         w = f"{where}.content[{j}]"
         kind = part.get("type") if isinstance(part, dict) else None
+        if not isinstance(kind, str):
+            raise InvalidItem(f"{w}.type: must be a string")
         if kind == "text":
             if not isinstance(part.get("text"), str):
                 raise InvalidItem(f"{w}.text: must be a string")

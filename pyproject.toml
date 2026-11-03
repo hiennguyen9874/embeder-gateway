@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi",
     "httpx",
+    "pillow>=13.0.0",
     "pyyaml",
     "uvicorn",
 ]

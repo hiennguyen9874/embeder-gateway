@@ -4,12 +4,15 @@ import base64
 import math
 import struct
 from contextlib import contextmanager
+from io import BytesIO
+from pathlib import Path
 
 import httpx
 import pytest
 import yaml
 from conftest import AUTH, BACKEND_KEY, CONFIG
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from gateway.app import create_app
 from gateway.backend import BackendClient
@@ -23,15 +26,25 @@ TAIL = "<|im_end|>\n<|im_start|>assistant\n"
 
 
 def png(n: int) -> bytes:
-    # n bytes, so each image is distinguishable (the gateway never decodes the picture itself).
-    return bytes([0x89]) * n
+    # Distinct valid images, padded to n bytes for the size-boundary tests.
+    buffer = BytesIO()
+    Image.new("RGB", (1, 1), (n % 256, 0, 0)).save(buffer, format="PNG")
+    return buffer.getvalue().ljust(n, b"\0")
+
+
+def jpeg() -> bytes:
+    buffer = BytesIO()
+    Image.new("RGB", (1, 1), "red").save(buffer, format="JPEG")
+    return buffer.getvalue()
 
 
 def data_uri(data: bytes) -> str:
     return "data:image/png;base64," + base64.b64encode(data).decode()
 
 
-URI = data_uri(png(1))  # "data:image/png;base64,iQ==", as in WeKnora's tests
+URI = data_uri(png(1))
+RAW = base64.b64encode(png(1)).decode()
+JPEG_URI = "data:image/jpeg;base64," + base64.b64encode(jpeg()).decode()
 
 
 def text_content(instruction: str, text: str) -> list[dict]:
@@ -87,8 +100,8 @@ def assert_400(r, *fragments: str):
     ({"text": "a red bicycle"}, text_content(DOCUMENT, "a red bicycle")),
     ({"image": URI}, image_content(DOCUMENT, URI)),
     ({"text": "a red bicycle", "image": URI}, image_content(DOCUMENT, URI, "a red bicycle")),
-    ({"image": "iQ=="}, image_content(DOCUMENT, "iQ==")),  # raw base64 is forwarded as sent
-    ({"image": "data:image/jpeg;base64,/9j/"}, image_content(DOCUMENT, "data:image/jpeg;base64,/9j/")),
+    ({"image": RAW}, image_content(DOCUMENT, RAW)),  # raw base64 is forwarded as sent
+    ({"image": JPEG_URI}, image_content(DOCUMENT, JPEG_URI)),
     ({}, text_content(DOCUMENT, "NULL")),  # empty Item, as in the official script
 ])
 def test_input_items_render_the_official_prompt_with_images_before_text(gateway, backend, item, content):
@@ -146,10 +159,41 @@ def test_remote_urls_video_and_bad_images_are_rejected_naming_the_item(gateway, 
     assert backend.embedding_bodies == []
 
 
+@pytest.mark.parametrize("kind", [[], {}, None, 42])
+def test_content_part_type_must_be_a_string(gateway, backend, kind):
+    assert_400(embed(gateway, messages=[
+        [{"role": "user", "content": "ok"}],
+        [{"role": "user", "content": [{"type": kind}]}],
+    ]), "messages[1][0].content[0]", "type")
+    assert backend.embedding_bodies == []
+
+
+@pytest.mark.parametrize("prefix", ["", "data:image/png;base64,"])
+@pytest.mark.parametrize("wire", ["input", "messages"])
+def test_disguised_video_is_rejected_before_the_backend(gateway, backend, prefix, wire):
+    video = Path(__file__).with_name("fixtures").joinpath("video.mp4").read_bytes()
+    value = prefix + base64.b64encode(video).decode()
+    body = (
+        {"input": ["ok", {"image": value}]} if wire == "input" else
+        {"messages": [user(text_part("ok")), user(image_part(value))]}
+    )
+    where = "input[1].image" if wire == "input" else "messages[1][0].content[0].image_url.url"
+
+    assert_400(embed(gateway, **body), where, "image")
+    assert backend.embedding_bodies == []
+
+
+@pytest.mark.parametrize("payload", [b"not an image", b"\x89PNG\r\n\x1a\ntruncated", jpeg()[:-20]])
+def test_invalid_image_bytes_are_rejected(gateway, backend, payload):
+    assert_400(embed(gateway, input=[{"image": data_uri(payload)}]), "input[0].image", "image")
+    assert backend.embedding_bodies == []
+
+
 # --- vLLM messages, as WeKnora's generic provider sends them for *qwen3-vl-embedding* ---
 # Bodies from references/WeKnora/internal/models/embedding/image_wire_test.go
 # (TestSelfHostedQwen3VLEmbeddingSendsTextAndImagesThroughTheTemplate) and
-# internal/models/api/openaiembeddings/golden_test.go.
+# internal/models/api/openaiembeddings/golden_test.go. Placeholder image bytes are
+# replaced with valid PNGs because image payloads are now verified.
 
 WEKNORA = {"model": MODEL, "encoding_format": "float", "truncate_prompt_tokens": 511, "add_special_tokens": True}
 
