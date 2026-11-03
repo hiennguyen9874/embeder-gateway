@@ -10,7 +10,7 @@ from gateway.prompts import FORMATS, PromptFormat
 ROLES = ("document", "query")
 MODALITIES = ("text", "image")
 DEFAULT_ARGS = {"parallel": 4, "ctx-size": 32768}
-DEFAULT_LIMITS = {"max_embedding_items": 64, "max_image_mb": 10, "max_body_mb": 50}
+DEFAULT_LIMITS = {"max_embedding_items": 64, "max_rerank_documents": 100, "max_image_mb": 10, "max_body_mb": 50}
 MB = 1024 * 1024
 
 
@@ -33,17 +33,19 @@ class ServedModel:
     name: str
     checkpoint: Checkpoint
     format: PromptFormat
-    dimensions: int  # returned when the request has no `dimensions`
-    min_dimensions: int  # smallest MRL truncation
-    max_dimensions: int  # the Checkpoint's native size
+    # Embedding only (None for reranking):
+    dimensions: int | None  # returned when the request has no `dimensions`
+    min_dimensions: int | None  # smallest MRL truncation
+    max_dimensions: int | None  # the Checkpoint's native size
     modalities: tuple[str, ...]
     role: str  # Input Role used when the request carries none
-    instructions: dict[str, str]  # Instruction per Input Role
+    instructions: dict[str, str]  # keyed like the Prompt Format's defaults
 
 
 @dataclass(frozen=True)
 class Limits:
     max_embedding_items: int
+    max_rerank_documents: int
     max_image_bytes: int
     max_body_bytes: int
 
@@ -89,11 +91,16 @@ def load_registry(path: str | Path) -> Registry:
             raise ValueError(f"served model {name!r}: role must be one of {ROLES}")
         if not set(m["modalities"]) <= set(MODALITIES):
             raise ValueError(f"served model {name!r}: modalities must be among {MODALITIES}")
-        max_dims = m["max_dimensions"]
-        min_dims = m.get("min_dimensions", max_dims)
-        dims = m.get("dimensions", max_dims)
-        if not 0 < min_dims <= dims <= max_dims:
-            raise ValueError(f"served model {name!r}: needs 0 < min_dimensions <= dimensions <= max_dimensions")
+        instructions = m.get("instructions", {})
+        if unknown := sorted(set(instructions) - set(fmt.instructions)):
+            raise ValueError(f"served model {name!r}: unknown instructions {unknown}; {m['format']} has {sorted(fmt.instructions)}")
+        max_dims = min_dims = dims = None
+        if fmt.kind == "embedding":
+            max_dims = m["max_dimensions"]
+            min_dims = m.get("min_dimensions", max_dims)
+            dims = m.get("dimensions", max_dims)
+            if not 0 < min_dims <= dims <= max_dims:
+                raise ValueError(f"served model {name!r}: needs 0 < min_dimensions <= dimensions <= max_dimensions")
         served[name] = ServedModel(
             name=name,
             checkpoint=checkpoints[m["checkpoint"]],
@@ -103,7 +110,7 @@ def load_registry(path: str | Path) -> Registry:
             max_dimensions=max_dims,
             modalities=tuple(m["modalities"]),
             role=role,
-            instructions={**fmt.instructions, **m.get("instructions", {})},
+            instructions={**fmt.instructions, **instructions},
         )
 
     backend = raw.get("backend", {})
@@ -115,6 +122,7 @@ def load_registry(path: str | Path) -> Registry:
         llama_server=base / backend.get("llama_server", "llama.cpp/llama-server"),
         limits=Limits(
             max_embedding_items=limits["max_embedding_items"],
+            max_rerank_documents=limits["max_rerank_documents"],
             max_image_bytes=int(limits["max_image_mb"] * MB),
             max_body_bytes=int(limits["max_body_mb"] * MB),
         ),

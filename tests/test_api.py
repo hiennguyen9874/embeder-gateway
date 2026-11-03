@@ -13,7 +13,7 @@ def assert_openai_error(r, status: int, code: str | None = None) -> dict:
 
 
 @pytest.mark.parametrize("headers", [{}, {"Authorization": "Bearer wrong"}, {"Authorization": "test-key"}])
-@pytest.mark.parametrize("method, path", [("POST", "/v1/embeddings"), ("GET", "/v1/models")])
+@pytest.mark.parametrize("method, path", [("POST", "/v1/embeddings"), ("POST", "/v1/rerank"), ("GET", "/v1/models")])
 def test_missing_or_invalid_bearer_key_is_401(gateway, backend, headers, method, path):
     r = gateway.request(method, path, headers=headers, json={"model": "Qwen3-VL-Embedding-2B", "input": "x"})
 
@@ -95,6 +95,8 @@ def test_models_lists_every_served_model_with_its_capabilities(gateway, backend)
          "kind": "embedding", "modalities": ["text", "image"], "dimensions": 2048, "max_dimensions": 2048},
         {"id": "Qwen3-VL-Embedding-2B-query", "object": "model", "created": 0, "owned_by": "embedder-gateway",
          "kind": "embedding", "modalities": ["text", "image"], "dimensions": 2048, "max_dimensions": 2048},
+        {"id": "Qwen3-VL-Reranker-2B", "object": "model", "created": 0, "owned_by": "embedder-gateway",
+         "kind": "reranking", "modalities": ["text", "image"]},
     ]}
     assert backend.requests == []
 
@@ -103,20 +105,23 @@ def test_health_is_200_when_every_preset_is_loaded_and_needs_no_key(gateway, bac
     r = gateway.get("/health")
 
     assert r.status_code == 200, r.text
-    assert r.json() == {"status": "ok", "checkpoints": {"Qwen3-VL-Embedding-2B-Q8_0": "loaded"}}
+    assert r.json() == {"status": "ok", "checkpoints": {
+        "Qwen3-VL-Embedding-2B-Q8_0": "loaded", "Qwen3-VL-Reranker-2B-Q8_0": "loaded",
+    }}
 
 
-@pytest.mark.parametrize("statuses, reported", [
-    ({"Qwen3-VL-Embedding-2B-Q8_0": "loading"}, "loading"),
-    ({"Qwen3-VL-Embedding-2B-Q8_0": "unloaded"}, "unloaded"),
-    ({"some-other-model": "loaded"}, "missing"),
-])
-def test_health_is_503_until_every_preset_is_loaded(gateway, backend, statuses, reported):
-    backend.statuses = statuses
+@pytest.mark.parametrize("checkpoint", ["Qwen3-VL-Embedding-2B-Q8_0", "Qwen3-VL-Reranker-2B-Q8_0"])
+@pytest.mark.parametrize("status, reported", [("loading", "loading"), ("unloaded", "unloaded"), (None, "missing")])
+def test_health_is_503_until_every_preset_is_loaded(gateway, backend, checkpoint, status, reported):
+    if status is None:
+        del backend.statuses[checkpoint]
+    else:
+        backend.statuses[checkpoint] = status
     r = gateway.get("/health")
 
     assert r.status_code == 503, r.text
-    assert r.json() == {"status": "unavailable", "checkpoints": {"Qwen3-VL-Embedding-2B-Q8_0": reported}}
+    assert r.json()["status"] == "unavailable"
+    assert r.json()["checkpoints"][checkpoint] == reported
 
 
 @pytest.mark.parametrize("status", ["unloaded", "loading", None, "loaded"])
@@ -145,7 +150,9 @@ def test_health_checks_checkpoints_without_served_models(tmp_path, backend, stat
     assert r.status_code == (200 if ready else 503), r.text
     assert r.json() == {
         "status": "ok" if ready else "unavailable",
-        "checkpoints": {"Qwen3-VL-Embedding-2B-Q8_0": "loaded", "extra": status or "missing"},
+        "checkpoints": {
+            "Qwen3-VL-Embedding-2B-Q8_0": "loaded", "Qwen3-VL-Reranker-2B-Q8_0": "loaded", "extra": status or "missing",
+        },
     }
 
 

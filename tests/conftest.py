@@ -23,7 +23,7 @@ class FakeBackend:
         self.requests: list[httpx.Request] = []
         # Raw, un-normalized vector: the gateway must return it L2-normalized as [0.6, 0.8, 0, ...].
         self.vector = [3.0, 4.0] + [0.0] * 2046
-        self.statuses = {"Qwen3-VL-Embedding-2B-Q8_0": "loaded"}
+        self.statuses = {"Qwen3-VL-Embedding-2B-Q8_0": "loaded", "Qwen3-VL-Reranker-2B-Q8_0": "loaded"}
         self.embeddings_response: httpx.Response | None = None
         # Per-input hooks: the vector to return, and an error message to reject the input with (400).
         self.vector_for: Callable[[dict], list[float]] = lambda input: self.vector

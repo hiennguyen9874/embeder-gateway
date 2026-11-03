@@ -13,6 +13,7 @@ backend:
 # Per-request limits (these are the defaults). Sizes are in MiB.
 limits:
   max_embedding_items: 64
+  max_rerank_documents: 100
   max_image_mb: 10
   max_body_mb: 50
 
@@ -28,6 +29,14 @@ checkpoints:
       embedding: true
       pooling: last
       embd-normalize: 2
+      device: CUDA0
+  Qwen3-VL-Reranker-2B-Q8_0:
+    repo: bealore/Qwen3-VL-Reranker-2B-GGUF
+    model: Qwen3-VL-Reranker-2B.Q8_0.gguf
+    mmproj: Qwen3-VL-Reranker-2B.mmproj-f16.gguf
+    args:
+      reranking: true
+      pooling: rank
       device: CUDA0
 
 served_models:
@@ -50,3 +59,9 @@ served_models:
     min_dimensions: 64
     modalities: [text, image]
     role: query
+  Qwen3-VL-Reranker-2B:
+    checkpoint: Qwen3-VL-Reranker-2B-Q8_0
+    format: qwen3-vl-reranker
+    modalities: [text, image]
+    # Optional override of the Prompt Format's default Instruction:
+    # instructions: {rerank: "..."}

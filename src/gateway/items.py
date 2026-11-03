@@ -147,3 +147,15 @@ def embedding_items(input, messages, max_items: int, max_image_bytes: int) -> li
     if len(values) > max_items:
         raise InvalidItem(f"{field}: {len(values)} inputs is over the limit of {max_items} per request")
     return [(f"{field}[{i}]", parse(v, f"{field}[{i}]", max_image_bytes)) for i, v in enumerate(values)]
+
+
+def rerank_items(query, documents, max_documents: int, max_image_bytes: int) -> list[tuple[str, Item]]:
+    """`query` and `documents` of a rerank request -> (location, Item) for the query, then each document."""
+    if not isinstance(documents, list):
+        raise InvalidItem("documents: must be an array of strings or Items")
+    if not documents:
+        raise InvalidItem("documents: must not be empty")
+    if len(documents) > max_documents:
+        raise InvalidItem(f"documents: {len(documents)} documents is over the limit of {max_documents} per request")
+    located = [("query", query), *((f"documents[{i}]", d) for i, d in enumerate(documents))]
+    return [(where, input_item(v, where, max_image_bytes)) for where, v in located]

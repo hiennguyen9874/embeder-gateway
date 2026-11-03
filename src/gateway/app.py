@@ -11,12 +11,12 @@ from typing import Any, Literal
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException
 
 from gateway.backend import BackendClient, BackendError
 from gateway.config import Registry, ServedModel
-from gateway.items import InvalidItem, embedding_items
+from gateway.items import InvalidItem, Item, embedding_items, rerank_items
 
 # input_type values (Cohere/Voyage/NIM style) -> Input Role
 INPUT_TYPES = {
@@ -26,6 +26,7 @@ INPUT_TYPES = {
     "search_document": "document",
     "passage": "document",
 }
+ROUTES = {"embedding": "/v1/embeddings", "reranking": "/v1/rerank"}
 
 
 class APIError(Exception):
@@ -47,6 +48,16 @@ class EmbeddingsRequest(BaseModel):
     input_type: str | None = None
     task: str | None = None
     # Accepted and ignored (ADR 0002): truncate_prompt_tokens, add_special_tokens, truncate, user.
+
+
+class RerankRequest(BaseModel):
+    model: str
+    # Required but may be anything: shapes are checked by the Request Adapters.
+    query: Any
+    documents: Any
+    top_n: int | None = Field(None, ge=1)
+    return_documents: bool = False
+    # Accepted and ignored (ADR 0002): truncate_prompt_tokens, truncate.
 
 
 def resolve_role(req: EmbeddingsRequest, model: ServedModel) -> str:
@@ -107,14 +118,43 @@ def create_app(registry: Registry, backend: BackendClient, api_keys: set[str]) -
     # Added before bearer_auth so it runs inside it: a bad key is a 401 whatever the body size.
     app.add_middleware(BodyLimit, max_bytes=limits.max_body_bytes)
 
-    def served_model(name: str) -> ServedModel:
+    def served_model(name: str, kind: str) -> ServedModel:
         if name not in registry.served_models:
             raise APIError(
                 404,
                 f"The model {name!r} does not exist. Served models: {', '.join(registry.served_models)}",
                 code="model_not_found",
             )
-        return registry.served_models[name]
+        model = registry.served_models[name]
+        if model.format.kind != kind:
+            raise APIError(
+                400, f"{name} is a {model.format.kind} model; use {ROUTES[model.format.kind]}", code="invalid_request"
+            )
+        return model
+
+    def check_modalities(model: ServedModel, items: list[tuple[str, Item]]) -> None:
+        for where, item in items:
+            given = {"text"} if item.text else set()
+            given |= {"image"} if item.images else set()
+            if missing := sorted(given - set(model.modalities)):
+                raise APIError(400, f"{where}: {model.name} does not accept {' or '.join(missing)} input", code="invalid_request")
+
+    async def embed_each(model: ServedModel, located: list[tuple[str, dict]], **options) -> list[dict]:
+        # One Backend request per input: the Backend fails a batch without saying which input was at fault.
+        results = await asyncio.gather(
+            *(backend.embed(model.checkpoint.name, [i], **options) for _, i in located), return_exceptions=True
+        )
+        for (where, _), r in zip(located, results):
+            if isinstance(r, BackendError) and r.status == 400:
+                raise APIError(400, f"{where}: {r.message}", code="invalid_input")
+        for r in results:
+            if isinstance(r, BaseException):
+                raise r
+        return results
+
+    def usage(results: list[dict]) -> dict:
+        tokens = sum(r.get("usage", {}).get("prompt_tokens", 0) for r in results)
+        return {"prompt_tokens": tokens, "total_tokens": tokens}
 
     @app.middleware("http")
     async def bearer_auth(request: Request, call_next):
@@ -158,7 +198,7 @@ def create_app(registry: Registry, backend: BackendClient, api_keys: set[str]) -
             {
                 "id": m.name, "object": "model", "created": 0, "owned_by": "embedder-gateway",
                 "kind": m.format.kind, "modalities": list(m.modalities),
-                "dimensions": m.dimensions, "max_dimensions": m.max_dimensions,
+                **({"dimensions": m.dimensions, "max_dimensions": m.max_dimensions} if m.format.kind == "embedding" else {}),
             }
             for m in registry.served_models.values()
         ]}
@@ -179,7 +219,7 @@ def create_app(registry: Registry, backend: BackendClient, api_keys: set[str]) -
 
     @app.post("/v1/embeddings")
     async def embeddings(req: EmbeddingsRequest):
-        model = served_model(req.model)
+        model = served_model(req.model, "embedding")
         dims = model.dimensions if req.dimensions is None else req.dimensions
         if not model.min_dimensions <= dims <= model.max_dimensions:
             raise APIError(
@@ -187,24 +227,13 @@ def create_app(registry: Registry, backend: BackendClient, api_keys: set[str]) -
                 code="invalid_request",
             )
         items = embedding_items(req.input, req.messages, limits.max_embedding_items, limits.max_image_bytes)
-        for where, item in items:
-            given = {"text"} if item.text else set()
-            given |= {"image"} if item.images else set()
-            if missing := sorted(given - set(model.modalities)):
-                raise APIError(400, f"{where}: {model.name} does not accept {' or '.join(missing)} input", code="invalid_request")
+        check_modalities(model, items)
 
         instruction = model.instructions[resolve_role(req, model)]
-        inputs = [model.format.render(item, instruction if item.instruction is None else item.instruction) for _, item in items]
-        # One Backend request per Item: the Backend fails a batch without saying which input was at fault.
-        results = await asyncio.gather(*(backend.embed(model.checkpoint.name, [i]) for i in inputs), return_exceptions=True)
-        for (where, _), r in zip(items, results):
-            if isinstance(r, BackendError) and r.status == 400:
-                raise APIError(400, f"{where}: {r.message}", code="invalid_input")
-        for r in results:
-            if isinstance(r, BaseException):
-                raise r
-
-        tokens = sum(r.get("usage", {}).get("prompt_tokens", 0) for r in results)
+        results = await embed_each(model, [
+            (where, model.format.render(item, instruction if item.instruction is None else item.instruction))
+            for where, item in items
+        ])
         return {
             "object": "list",
             "data": [
@@ -213,7 +242,32 @@ def create_app(registry: Registry, backend: BackendClient, api_keys: set[str]) -
                 for i, r in enumerate(results)
             ],
             "model": model.name,
-            "usage": {"prompt_tokens": tokens, "total_tokens": tokens},
+            "usage": usage(results),
+        }
+
+    @app.post("/v1/rerank")
+    async def rerank(req: RerankRequest):
+        model = served_model(req.model, "reranking")
+        items = rerank_items(req.query, req.documents, limits.max_rerank_documents, limits.max_image_bytes)
+        check_modalities(model, items)
+
+        (_, query), documents = items[0], items[1:]
+        instruction = model.instructions["rerank"]
+        # Rank pooling outputs [P("yes"), P("no")]; read it raw, not L2-normalized (ADR 0003).
+        results = await embed_each(
+            model, [(where, model.format.render(query, doc, instruction)) for where, doc in documents], embd_normalize=-1
+        )
+        scores = [r["data"][0]["embedding"][0] for r in results]
+        ranked = sorted(range(len(scores)), key=lambda i: -scores[i])  # stable: ties keep document order
+        return {
+            "model": model.name,
+            "results": [
+                {"index": i, "relevance_score": scores[i],
+                 # Text only: an image document's payload is never echoed back.
+                 **({"document": {"text": documents[i][1].text}} if req.return_documents else {})}
+                for i in ranked[:req.top_n]
+            ],
+            "usage": usage(results),
         }
 
     return app

@@ -32,11 +32,12 @@ class BackendClient:
             raise BackendError(r.status_code, message)
         return r.json()
 
-    async def embed(self, model: str, inputs: list) -> dict:
-        """POST /v1/embeddings; returns the OpenAI-shaped response."""
-        return await self._request(
-            "POST", "/v1/embeddings", json={"model": model, "input": inputs, "encoding_format": "float"}
-        )
+    async def embed(self, model: str, inputs: list, embd_normalize: int | None = None) -> dict:
+        """POST /v1/embeddings; returns the OpenAI-shaped response. `embd_normalize` overrides the preset's."""
+        body = {"model": model, "input": inputs, "encoding_format": "float"}
+        if embd_normalize is not None:
+            body["embd_normalize"] = embd_normalize
+        return await self._request("POST", "/v1/embeddings", json=body)
 
     async def model_statuses(self) -> dict[str, str]:
         """Router model id -> status ("loaded", "loading", "unloaded", ...)."""

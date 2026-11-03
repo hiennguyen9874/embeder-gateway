@@ -28,8 +28,13 @@ def gateway():
             yield client
 
 
-# A cartoon llama head, from the vendored llama.cpp checkout.
+# A cartoon llama head and a matrix-multiplication diagram, from the vendored llama.cpp checkout.
 LLAMA_PNG = CONFIG.parent / "llama.cpp" / "media" / "llama1-icon.png"
+MATMUL_PNG = CONFIG.parent / "llama.cpp" / "media" / "matmul.png"
+
+
+def uri(path) -> str:
+    return "data:image/png;base64," + base64.b64encode(path.read_bytes()).decode()
 
 
 def embed(gateway, model: str, inputs: list, **extra) -> list[list[float]]:
@@ -40,6 +45,16 @@ def embed(gateway, model: str, inputs: list, **extra) -> list[list[float]]:
 
 def dot(a, b) -> float:
     return sum(x * y for x, y in zip(a, b))
+
+
+def rerank(gateway, query, documents) -> dict[int, float]:
+    r = gateway.post("/v1/rerank", headers=AUTH, json={"model": "Qwen3-VL-Reranker-2B", "query": query, "documents": documents})
+    assert r.status_code == 200, r.text
+    results = r.json()["results"]
+    scores = [x["relevance_score"] for x in results]
+    assert scores == sorted(scores, reverse=True)
+    assert all(0 <= s <= 1 for s in scores), scores
+    return {x["index"]: x["relevance_score"] for x in results}
 
 
 def test_health_is_ok_once_the_router_has_loaded_the_preset(gateway):
@@ -77,6 +92,28 @@ def test_image_is_closer_to_a_matching_caption_than_an_unrelated_one(gateway):
     assert dot(image, matching) > dot(image, unrelated) + 0.05, (dot(image, matching), dot(image, unrelated))
     # The text part of a text+image Item reaches the model.
     assert dot(image, with_text) < 0.999
+
+
+def test_rerank_scores_the_relevant_document_clearly_higher(gateway):
+    # The bealore model card's example: about 0.73, 0.27 and 0.51 with its own (different) Instruction.
+    scores = rerank(gateway, "What is the capital of France?", [
+        "Paris is the capital and most populous city of France.",
+        "Bananas are a yellow tropical fruit rich in potassium.",
+        "The Eiffel Tower is a famous landmark located in Paris, France.",
+    ])
+
+    assert scores[0] > scores[1] + 0.3, scores
+    assert scores[2] > scores[1], scores
+
+
+def test_rerank_scores_image_documents_and_image_queries(gateway):
+    llama, matmul = uri(LLAMA_PNG), uri(MATMUL_PNG)
+    # (A text llama query barely prefers the stylized llama icon, natively in llama.cpp too, so it is not used.)
+    by_image = rerank(gateway, "A matrix multiplication diagram.", [{"image": matmul}, {"image": llama}])
+    by_text = rerank(gateway, {"image": llama}, ["A diagram of matrix multiplication.", "A cartoon llama."])
+
+    assert by_image[0] > by_image[1] + 0.2, by_image
+    assert by_text[1] > by_text[0] + 0.2, by_text
 
 
 def test_weknora_messages_batch_and_mrl_dimensions(gateway):

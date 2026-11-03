@@ -68,3 +68,20 @@ def test_shipped_config_preset_runs_qwen3_vl_embedding_as_a_last_pooled_normaliz
         "ctx-size": "32768",
     }
     assert Path(preset["model"]).is_absolute()
+
+
+def test_shipped_config_preset_runs_qwen3_vl_reranker_with_rank_pooling():
+    ini = configparser.ConfigParser()
+    ini.read_string(render_preset(load_registry(CONFIG)))
+
+    checkpoint_dir = CONFIG.parent / "models" / "bealore--Qwen3-VL-Reranker-2B-GGUF"
+    assert dict(ini["Qwen3-VL-Reranker-2B-Q8_0"]) == {
+        "model": str(checkpoint_dir / "Qwen3-VL-Reranker-2B.Q8_0.gguf"),
+        "mmproj": str(checkpoint_dir / "Qwen3-VL-Reranker-2B.mmproj-f16.gguf"),
+        "load-on-startup": "true",
+        "reranking": "true",
+        "pooling": "rank",
+        "device": "CUDA0",
+        "parallel": "4",
+        "ctx-size": "32768",
+    }
