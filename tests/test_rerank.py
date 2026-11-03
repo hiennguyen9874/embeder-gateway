@@ -1,5 +1,6 @@
 """POST /v1/rerank: Cohere-style results computed from gateway-rendered Qwen3-VL-Reranker prompts (ADR 0003)."""
 
+import asyncio
 import base64
 
 import httpx
@@ -284,6 +285,57 @@ def test_an_over_long_document_is_400_naming_it(gateway, backend):
     r = rerank(gateway, query="q", documents=["short", "long"])
 
     assert_400(r, "documents[1]", "9000 tokens")
+
+
+@pytest.mark.parametrize("parallel", [2, 4])
+def test_image_query_fanout_is_bounded_across_requests_and_recovers_after_errors(backend, parallel):
+    from conftest import CONFIG
+
+    from gateway.app import create_app
+    from gateway.backend import BackendClient
+    from gateway.config import load_registry
+
+    async def run():
+        active = peak = 0
+
+        async def handle(request):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            try:
+                await asyncio.sleep(0.001)
+                return backend.handle(request)
+            finally:
+                active -= 1
+
+        client = BackendClient("http://backend", "internal-key", transport=httpx.MockTransport(handle))
+        registry = load_registry(CONFIG)
+        registry.checkpoints[CHECKPOINT].args["parallel"] = parallel
+        app = create_app(registry, client, {"test-key"})
+        try:
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gateway") as gateway:
+                body = {"model": MODEL, "query": {"image": URI}, "documents": ["d"] * 100}
+                responses = await asyncio.gather(*(
+                    gateway.post("/v1/rerank", headers=AUTH, json=body) for _ in range(2)
+                ))
+                assert all(r.status_code == 200 and len(r.json()["results"]) == 100 for r in responses)
+                assert len(backend.embedding_bodies) == 200
+                assert 1 < peak <= parallel
+
+                backend.embeddings_response = httpx.Response(500, json={"error": {"message": "boom"}})
+                failed = await gateway.post("/v1/rerank", headers=AUTH, json=body)
+                assert failed.status_code == 502
+                backend.embeddings_response = None
+                recovered = await asyncio.wait_for(
+                    gateway.post("/v1/rerank", headers=AUTH, json=body), timeout=5
+                )
+                assert recovered.status_code == 200
+                assert active == 0
+                assert peak <= parallel
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
 
 
 def test_backend_failure_is_502(gateway, backend):

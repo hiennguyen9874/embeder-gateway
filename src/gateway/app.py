@@ -115,6 +115,11 @@ def create_app(registry: Registry, backend: BackendClient, api_keys: set[str]) -
 
     app = FastAPI(title="Embedder Gateway", lifespan=lifespan)
     limits = registry.limits
+    # Share each Checkpoint's slots across requests; acquire before serializing repeated query images.
+    backend_slots = {
+        name: asyncio.Semaphore(max(1, int(checkpoint.args["parallel"])))
+        for name, checkpoint in registry.checkpoints.items()
+    }
     # Added before bearer_auth so it runs inside it: a bad key is a 401 whatever the body size.
     app.add_middleware(BodyLimit, max_bytes=limits.max_body_bytes)
 
@@ -140,10 +145,12 @@ def create_app(registry: Registry, backend: BackendClient, api_keys: set[str]) -
                 raise APIError(400, f"{where}: {model.name} does not accept {' or '.join(missing)} input", code="invalid_request")
 
     async def embed_each(model: ServedModel, located: list[tuple[str, dict]], **options) -> list[dict]:
+        async def embed(input: dict) -> dict:
+            async with backend_slots[model.checkpoint.name]:
+                return await backend.embed(model.checkpoint.name, [input], **options)
+
         # One Backend request per input: the Backend fails a batch without saying which input was at fault.
-        results = await asyncio.gather(
-            *(backend.embed(model.checkpoint.name, [i], **options) for _, i in located), return_exceptions=True
-        )
+        results = await asyncio.gather(*(embed(i) for _, i in located), return_exceptions=True)
         for (where, _), r in zip(located, results):
             if isinstance(r, BackendError) and r.status == 400:
                 raise APIError(400, f"{where}: {r.message}", code="invalid_input")
